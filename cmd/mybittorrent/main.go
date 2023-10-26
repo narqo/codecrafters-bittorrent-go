@@ -1,11 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -121,22 +124,54 @@ func main() {
 			panic(err)
 		}
 
-		var b bytes.Buffer
-		err = bencode.Marshal(&b, t.Info)
+		fmt.Printf("Tracker URL: %s\n", t.Announce)
+		fmt.Printf("Length: %d\n", t.Info.Length)
+
+		infoHash, err := t.InfoHash()
 		if err != nil {
 			panic(err)
 		}
 
-		infoHash := sha1.Sum(b.Bytes())
-
-		fmt.Printf("Tracker URL: %s\n", t.Announce)
-		fmt.Printf("Length: %d\n", t.Info.Length)
 		fmt.Printf("Info Hash: %x\n", infoHash)
 		fmt.Printf("Piece Length: %d\n", t.Info.PieceLength)
 
 		fmt.Printf("Piece Hashes:\n")
 		for p := []byte(t.Info.Pieces); len(p) > 0; p = p[20:] {
 			fmt.Printf("%x\n", p[:20])
+		}
+	case "peers":
+		filePath := os.Args[2]
+		f, err := os.Open(filePath)
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+
+		var t Tracker
+		err = bencode.Unmarshal(f, &t)
+		if err != nil {
+			panic(err)
+		}
+
+		turl, err := trackerURLFrom(t)
+		if err != nil {
+			panic(err)
+		}
+
+		httpResp, err := http.Get(turl)
+		if err != nil {
+			panic(err)
+		}
+		defer httpResp.Body.Close()
+
+		var trackerResp trackerResponse
+		err = bencode.Unmarshal(httpResp.Body, &trackerResp)
+		if err != nil {
+			panic(err)
+		}
+
+		for _, peer := range trackerResp.Peers() {
+			fmt.Println(peer.String())
 		}
 	default:
 		fmt.Println("Unknown command: " + cmd)
@@ -161,4 +196,66 @@ type TrackerInfo struct {
 	Pieces string `bencode:"pieces"`
 	// Length is the size of the file in bytes, for single-file torrents
 	Length uint64 `bencode:"length"`
+}
+
+func (t Tracker) InfoHash() ([]byte, error) {
+	h := sha1.New()
+	err := bencode.Marshal(h, t.Info)
+	if err != nil {
+		return nil, err
+	}
+	ret := h.Sum(nil)
+	return ret[:], nil
+}
+
+func trackerURLFrom(t Tracker) (string, error) {
+	u, err := url.Parse(t.Announce)
+	if err != nil {
+		return "", nil
+	}
+
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", nil
+	}
+	// the info hash of the torrent file
+	infoHash, err := t.InfoHash()
+	if err != nil {
+		return "", nil
+	}
+	q.Add("info_hash", string(infoHash))
+	// a unique identifier for your client
+	q.Add("peer_id", "00112233445566778899")
+	// the port your client is listening on
+	q.Add("port", "6881")
+	// the total amount uploaded so far (always 0)
+	q.Add("uploaded", "0")
+	// the total amount downloaded (always 0)
+	q.Add("downloaded", "0")
+	// the number of bytes left to download
+	left := strconv.FormatUint(t.Info.Length, 10)
+	q.Add("left", left)
+	// whether the peer list should use the compact representation (always 1)
+	q.Add("compact", "1")
+
+	u.RawQuery = q.Encode()
+
+	return u.String(), nil
+}
+
+type trackerResponse struct {
+	Interval uint64 `bencode:"interval"`
+	RawPeers string `bencode:"peers"`
+}
+
+func (tr trackerResponse) Peers() []netip.AddrPort {
+	rawPeers := []byte(tr.RawPeers)
+	peers := make([]netip.AddrPort, 0, len(rawPeers)/6)
+	for len(rawPeers) > 0 {
+		addr, _ := netip.AddrFromSlice(rawPeers[:4])
+		port := binary.BigEndian.Uint16(rawPeers[4:])
+		peers = append(peers, netip.AddrPortFrom(addr, port))
+		rawPeers = rawPeers[6:]
+	}
+	return peers
 }
