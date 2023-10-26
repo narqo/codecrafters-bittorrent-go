@@ -55,6 +55,33 @@ func decodeBencode(s string) (interface{}, string, error) {
 			}
 		}
 		return list, s, nil
+	case tag == 'd':
+		dict := make(map[string]interface{}, 0)
+		s = s[1:]
+		for s != "" {
+			var (
+				v   interface{}
+				err error
+			)
+			v, s, err = decodeBencode(s)
+			if err != nil {
+				return nil, s, err
+			}
+			k, ok := v.(string)
+			if !ok {
+				return nil, s, fmt.Errorf("key must be string, got %T (%v)", v, v)
+			}
+			v, s, err = decodeBencode(s)
+			if err != nil {
+				return nil, s, err
+			}
+			dict[k] = v
+			// consume the end of the list
+			if s[0] == 'e' {
+				s = s[1:]
+			}
+		}
+		return dict, s, nil
 	default:
 		return "", s, errors.ErrUnsupported
 	}
