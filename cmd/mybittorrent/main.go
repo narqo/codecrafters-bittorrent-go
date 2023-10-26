@@ -14,19 +14,27 @@ import (
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
 func decodeBencode(s string) (interface{}, error) {
-	if unicode.IsDigit(rune(s[0])) {
+	tag := s[0]
+	switch {
+	case unicode.IsDigit(rune(tag)):
 		head, tail, ok := strings.Cut(s, ":")
 		if !ok {
 			return nil, fmt.Errorf("can't find colon in %q", s)
 		}
 
-		l, err := strconv.Atoi(head)
+		slen, err := strconv.Atoi(head)
 		if err != nil {
 			return "", err
 		}
 
-		return tail[:l], nil
-	} else {
+		return tail[:slen], nil
+	case tag == 'i':
+		head, _, ok := strings.Cut(s[1:], "e")
+		if !ok {
+			return nil, fmt.Errorf("can't find end of %q", s)
+		}
+		return strconv.Atoi(head)
+	default:
 		return "", fmt.Errorf("only strings are supported at the moment")
 	}
 }
