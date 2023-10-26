@@ -8,7 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
+
+	bencode "github.com/jackpal/bencode-go"
 )
 
 // Example:
@@ -105,8 +106,42 @@ func main() {
 		out, _ := json.Marshal(val)
 		fmt.Println(string(out))
 	case "info":
+		filePath := os.Args[2]
+		f, err := os.Open(filePath)
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+
+		var t Tracker
+		err = bencode.Unmarshal(f, &t)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Tracker URL: %s\n", t.Announce)
+		fmt.Printf("Length: %d\n", t.Info.Length)
 	default:
 		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
 	}
+}
+
+type Tracker struct {
+	// Announce is a URL to a tracker.
+	Announce string
+	// Info contains metainfo of a tracker.
+	Info TrackerInfo
+}
+
+type TrackerInfo struct {
+	// Name is a suggested name to save the file or directory as.
+	Name string
+	// PieceLength is the number of bytes in each piece the file is split into.
+	PieceLength int64 `bencode:"piece length"`
+	// Pieces is a string of multiple of 20. It is to be subdivided into strings of length 20,
+	// each of which is the SHA1 hash of the piece at the corresponding index.
+	Pieces string
+	// Length is the size of the file in bytes, for single-file torrents
+	Length uint64
 }
