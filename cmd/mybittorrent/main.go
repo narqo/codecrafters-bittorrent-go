@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,8 +121,17 @@ func main() {
 			panic(err)
 		}
 
+		var b bytes.Buffer
+		err = bencode.Marshal(&b, t.Info)
+		if err != nil {
+			panic(err)
+		}
+
+		infoHash := sha1.Sum(b.Bytes())
+
 		fmt.Printf("Tracker URL: %s\n", t.Announce)
 		fmt.Printf("Length: %d\n", t.Info.Length)
+		fmt.Printf("Info Hash: %x\n", infoHash)
 	default:
 		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
@@ -136,12 +147,12 @@ type Tracker struct {
 
 type TrackerInfo struct {
 	// Name is a suggested name to save the file or directory as.
-	Name string
+	Name string `bencode:"name"`
 	// PieceLength is the number of bytes in each piece the file is split into.
 	PieceLength int64 `bencode:"piece length"`
 	// Pieces is a string of multiple of 20. It is to be subdivided into strings of length 20,
 	// each of which is the SHA1 hash of the piece at the corresponding index.
-	Pieces string
+	Pieces string `bencode:"pieces"`
 	// Length is the size of the file in bytes, for single-file torrents
-	Length uint64
+	Length uint64 `bencode:"length"`
 }
