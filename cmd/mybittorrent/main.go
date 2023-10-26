@@ -27,7 +27,6 @@ func decodeBencode(s string) (interface{}, string, error) {
 		if err != nil {
 			return "", "", err
 		}
-
 		return tail[:slen], tail[slen:], nil
 	case tag == 'i':
 		head, tail, ok := strings.Cut(s[1:], "e")
@@ -39,7 +38,7 @@ func decodeBencode(s string) (interface{}, string, error) {
 	case tag == 'l':
 		var list []interface{}
 		s = s[1:]
-		for s != "" {
+		for {
 			var (
 				v   interface{}
 				err error
@@ -49,16 +48,17 @@ func decodeBencode(s string) (interface{}, string, error) {
 				return nil, s, err
 			}
 			list = append(list, v)
-			// consume the end of the list
+			// consume the end of the list and exit
 			if s[0] == 'e' {
 				s = s[1:]
+				break
 			}
 		}
 		return list, s, nil
 	case tag == 'd':
 		dict := make(map[string]interface{}, 0)
 		s = s[1:]
-		for s != "" {
+		for {
 			var (
 				v   interface{}
 				err error
@@ -76,9 +76,10 @@ func decodeBencode(s string) (interface{}, string, error) {
 				return nil, s, err
 			}
 			dict[k] = v
-			// consume the end of the list
+			// consume the end of the list and exit
 			if s[0] == 'e' {
 				s = s[1:]
+				break
 			}
 		}
 		return dict, s, nil
@@ -88,9 +89,8 @@ func decodeBencode(s string) (interface{}, string, error) {
 }
 
 func main() {
-	command := os.Args[1]
-
-	if command == "decode" {
+	switch cmd := os.Args[1]; cmd {
+	case "decode":
 		input := os.Args[2]
 		val, tail, err := decodeBencode(input)
 		if err != nil {
@@ -104,8 +104,9 @@ func main() {
 
 		out, _ := json.Marshal(val)
 		fmt.Println(string(out))
-	} else {
-		fmt.Println("Unknown command: " + command)
+	case "info":
+	default:
+		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
 	}
 }
