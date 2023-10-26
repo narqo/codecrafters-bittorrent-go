@@ -17,13 +17,13 @@ import (
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
-func decodeBencode(s string) (interface{}, string, error) {
-	tag := s[0]
+func decodeBencode(str string) (interface{}, string, error) {
+	tag := str[0]
 	switch {
 	case unicode.IsDigit(rune(tag)):
-		head, tail, ok := strings.Cut(s, ":")
+		head, tail, ok := strings.Cut(str, ":")
 		if !ok {
-			return nil, "", fmt.Errorf("can't find colon in %q", s)
+			return nil, "", fmt.Errorf("can't find colon in %q", str)
 		}
 
 		slen, err := strconv.Atoi(head)
@@ -32,62 +32,62 @@ func decodeBencode(s string) (interface{}, string, error) {
 		}
 		return tail[:slen], tail[slen:], nil
 	case tag == 'i':
-		head, tail, ok := strings.Cut(s[1:], "e")
+		head, tail, ok := strings.Cut(str[1:], "e")
 		if !ok {
-			return nil, "", fmt.Errorf("can't find end of %q", s)
+			return nil, "", fmt.Errorf("can't find end of %q", str)
 		}
 		n, err := strconv.Atoi(head)
 		return n, tail, err
 	case tag == 'l':
 		var list []interface{}
-		s = s[1:]
+		str = str[1:]
 		for {
 			var (
 				v   interface{}
 				err error
 			)
-			v, s, err = decodeBencode(s)
+			v, str, err = decodeBencode(str)
 			if err != nil {
-				return nil, s, err
+				return nil, str, err
 			}
 			list = append(list, v)
 			// consume the end of the list and exit
-			if s[0] == 'e' {
-				s = s[1:]
+			if str[0] == 'e' {
+				str = str[1:]
 				break
 			}
 		}
-		return list, s, nil
+		return list, str, nil
 	case tag == 'd':
 		dict := make(map[string]interface{}, 0)
-		s = s[1:]
+		str = str[1:]
 		for {
 			var (
 				v   interface{}
 				err error
 			)
-			v, s, err = decodeBencode(s)
+			v, str, err = decodeBencode(str)
 			if err != nil {
-				return nil, s, err
+				return nil, str, err
 			}
 			k, ok := v.(string)
 			if !ok {
-				return nil, s, fmt.Errorf("key must be string, got %T (%v)", v, v)
+				return nil, str, fmt.Errorf("key must be string, got %T (%v)", v, v)
 			}
-			v, s, err = decodeBencode(s)
+			v, str, err = decodeBencode(str)
 			if err != nil {
-				return nil, s, err
+				return nil, str, err
 			}
 			dict[k] = v
 			// consume the end of the list and exit
-			if s[0] == 'e' {
-				s = s[1:]
+			if str[0] == 'e' {
+				str = str[1:]
 				break
 			}
 		}
-		return dict, s, nil
+		return dict, str, nil
 	default:
-		return "", s, errors.ErrUnsupported
+		return "", str, errors.ErrUnsupported
 	}
 }
 
