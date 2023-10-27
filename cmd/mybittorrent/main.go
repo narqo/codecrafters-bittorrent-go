@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unsafe"
 
 	bencode "github.com/jackpal/bencode-go"
 )
@@ -173,6 +176,48 @@ func main() {
 		for _, peer := range trackerResp.Peers() {
 			fmt.Println(peer.String())
 		}
+	case "handshake":
+		filePath := os.Args[2]
+		peer := os.Args[3]
+
+		f, err := os.Open(filePath)
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+
+		var t Tracker
+		err = bencode.Unmarshal(f, &t)
+		if err != nil {
+			panic(err)
+		}
+
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			panic(err)
+		}
+		defer conn.Close()
+
+		hsk, err := handshakeFrom(t)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = hsk.WriteTo(conn)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = hsk.ReadFrom(conn)
+		if err != nil {
+			panic(err)
+		}
+
+		if hsk.Tag != 19 {
+			panic("unexpected handshake response")
+		}
+
+		fmt.Printf("Peer ID: %x\n", hsk.PeerID)
 	default:
 		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
@@ -258,4 +303,47 @@ func (tr trackerResponse) Peers() []netip.AddrPort {
 		rawPeers = rawPeers[6:]
 	}
 	return peers
+}
+
+type handshake struct {
+	// Tag is the length of the protocol string, always 19
+	Tag byte
+	// Proto is the protocol string "BitTorrent protocol"
+	Proto [19]byte
+	// Reserved is reserved bytes, which are all set to zero
+	Reserved [8]byte
+	// InfoHash is the info hash of the torrent
+	InfoHash [20]byte
+	// PeerID is the id of the peer
+	PeerID [20]byte
+}
+
+func handshakeFrom(t Tracker) (handshake, error) {
+	infoHash, err := t.InfoHash()
+	if err != nil {
+		return handshake{}, nil
+	}
+	hsk := handshake{
+		Tag:      19,
+		Proto:    [19]byte([]byte("BitTorrent protocol")),
+		InfoHash: [20]byte(infoHash),
+		PeerID:   [20]byte([]byte("00112233445566778899")),
+	}
+	return hsk, nil
+}
+
+func (hsk handshake) WriteTo(w io.Writer) (int64, error) {
+	err := binary.Write(w, binary.BigEndian, hsk)
+	if err != nil {
+		return 0, err
+	}
+	return int64(unsafe.Sizeof(hsk)), nil
+}
+
+func (hsk *handshake) ReadFrom(r io.Reader) (int64, error) {
+	err := binary.Read(r, binary.BigEndian, hsk)
+	if err != nil {
+		return 0, err
+	}
+	return int64(unsafe.Sizeof(hsk)), nil
 }
