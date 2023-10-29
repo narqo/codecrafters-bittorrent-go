@@ -240,9 +240,6 @@ func downloadPieceCmd(args []string) error {
 	return nil
 }
 
-// maximum number of pieces downloaded concurrently
-const maxConcurrentPieces = 5
-
 func downloadCmd(args []string) error {
 	flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
 
@@ -311,7 +308,9 @@ func downloadCmd(args []string) error {
 	}
 
 	var g errgroup.Group
-	g.SetLimit(maxConcurrentPieces)
+	// to make it simpler, limit the concurrency with number of peers;
+	// this makes sure a peer only responsible for one piece at the time
+	g.SetLimit(len(peers))
 
 	piecesIter := t.Info.PiecesAll()
 	piecesIter(func(n int, pieceHash []byte) bool {
