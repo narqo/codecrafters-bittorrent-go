@@ -290,11 +290,6 @@ func main() {
 		// block per piece rounded up
 		blocksPerPiece := int((t.Info.PieceLength + maxBlockSize - 1) / maxBlockSize)
 
-		pf, err := os.CreateTemp("", filePath)
-		if err != nil {
-			panic(err)
-		}
-
 		for b := 0; b < blocksPerPiece; b++ {
 			begin := uint32(b * maxBlockSize)
 			blen := uint32(maxBlockSize)
@@ -311,7 +306,14 @@ func main() {
 			}
 
 			//fmt.Printf("send: piece %d, block %d\n", piece, b)
+		}
 
+		pf, err := os.CreateTemp("", filePath)
+		if err != nil {
+			panic(err)
+		}
+
+		for b := blocksPerPiece; b > 0; b-- {
 			if err := m.Recv(conn, Piece); err != nil {
 				panic(err)
 			}
@@ -322,7 +324,7 @@ func main() {
 
 			//fmt.Printf("recv: piece %d, %d\n", piece, len(m.Payload))
 
-			begin = binary.BigEndian.Uint32(m.Payload[4:])
+			begin := binary.BigEndian.Uint32(m.Payload[4:])
 			_, err := pf.WriteAt(m.Payload[8:], int64(begin))
 			if err != nil {
 				panic(err)
