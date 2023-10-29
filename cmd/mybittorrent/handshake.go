@@ -21,19 +21,14 @@ type handshake struct {
 	PeerID [20]byte
 }
 
-func handshakeFrom(t Tracker) (handshake, error) {
-	infoHash, err := t.InfoHash()
-	if err != nil {
-		return handshake{}, nil
-	}
-	hsk := handshake{
+func newHandshake(infoHash []byte) handshake {
+	return handshake{
 		Tag:      protocolStrLen,
 		Proto:    [protocolStrLen]byte([]byte("BitTorrent protocol")),
 		InfoHash: [20]byte(infoHash),
 		// hard-coded for test implementation
 		PeerID: [20]byte([]byte("00112233445566778899")),
 	}
-	return hsk, nil
 }
 
 func (m handshake) WriteTo(w io.Writer) (int64, error) {

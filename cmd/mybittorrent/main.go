@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
@@ -188,10 +189,12 @@ func main() {
 		}
 		defer conn.Close()
 
-		hsk, err := handshakeFrom(t)
+		infoHash, err := t.InfoHash()
 		if err != nil {
 			panic(err)
 		}
+
+		hsk := newHandshake(infoHash)
 
 		_, err = hsk.WriteTo(conn)
 		if err != nil {
@@ -209,146 +212,243 @@ func main() {
 
 		fmt.Printf("Peer ID: %x\n", hsk.PeerID)
 	case "download_piece":
-		flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
-
-		var outPath string
-		flags.StringVar(&outPath, "o", "", "Ouput path")
-
-		if err := flags.Parse(os.Args[2:]); err != nil {
-			fmt.Println(err)
+		err := downloadPieceCmd(os.Args[2:])
+		if err != nil {
+			fmt.Println("Download piece command failed: " + err.Error())
 			os.Exit(1)
 		}
-
-		filePath := flags.Arg(0)
-		piece, _ := strconv.Atoi(flags.Arg(1))
-		_ = piece
-
-		f, err := os.Open(filePath)
+	case "download":
+		err := downloadCmd(os.Args[2:])
 		if err != nil {
-			panic(err)
+			fmt.Println("Download command failed: " + err.Error())
+			os.Exit(1)
 		}
-		defer f.Close()
-
-		var t Tracker
-		err = bencode.Unmarshal(f, &t)
-		if err != nil {
-			panic(err)
-		}
-
-		peers, err := discoverPeers(t)
-		if err != nil {
-			panic(err)
-		}
-
-		peer := peers[0]
-
-		fmt.Printf("Peer: %s\n", peer)
-
-		conn, err := net.Dial("tcp", peer.String())
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Close()
-
-		hsk, err := handshakeFrom(t)
-		if err != nil {
-			panic(err)
-		}
-
-		_, err = hsk.WriteTo(conn)
-		if err != nil {
-			panic(err)
-		}
-
-		_, err = hsk.ReadFrom(conn)
-		if err != nil {
-			panic(err)
-		}
-
-		if hsk.Tag != protocolStrLen {
-			panic("unexpected handshake response")
-		}
-
-		var m message
-		if err := m.Recv(conn, Bitfield); err != nil {
-			panic(err)
-		}
-
-		// TODO: check that bitfield's payload has the len(pieces) bits set
-		fmt.Printf("bitfield - %d\n", m.Payload)
-
-		if err := m.Send(conn, Interested, nil); err != nil {
-			panic(err)
-		}
-
-		if err := m.Recv(conn, Unchoke); err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("unchoke - %d\n", m.Payload)
-
-		// block per piece rounded up
-		blocksPerPiece := int((t.Info.PieceLength + maxBlockSize - 1) / maxBlockSize)
-
-		for b := 0; b < blocksPerPiece; b++ {
-			begin := uint32(b * maxBlockSize)
-			blen := uint32(maxBlockSize)
-
-			// the very last block (across all pieces) can be truncated, if file's length
-			// doesn't perfectly align to the size of a block
-			if total := uint64((piece + 1) * (b + 1) * int(blen)); total > t.Info.Length {
-				blen = blen - uint32(total-t.Info.Length)
-			}
-
-			payload := m.packUint32(uint32(piece), begin, blen)
-			if err := m.Send(conn, Request, payload); err != nil {
-				panic(err)
-			}
-
-			//fmt.Printf("send: piece %d, block %d\n", piece, b)
-		}
-
-		pf, err := os.CreateTemp("", filePath)
-		if err != nil {
-			panic(err)
-		}
-
-		for b := blocksPerPiece; b > 0; b-- {
-			if err := m.Recv(conn, Piece); err != nil {
-				panic(err)
-			}
-
-			if p := binary.BigEndian.Uint32(m.Payload[:]); p != uint32(piece) {
-				panic("unexpected piece")
-			}
-
-			//fmt.Printf("recv: piece %d, %d\n", piece, len(m.Payload))
-
-			begin := binary.BigEndian.Uint32(m.Payload[4:])
-			_, err := pf.WriteAt(m.Payload[8:], int64(begin))
-			if err != nil {
-				panic(err)
-			}
-		}
-
-		pf.Seek(0, io.SeekStart)
-
-		h := sha1.New()
-		if _, err := io.Copy(h, pf); err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("Piece hash: %x\n", h.Sum(nil))
-
-		if err := os.Rename(pf.Name(), outPath); err != nil {
-			os.Remove(pf.Name())
-			panic(err)
-		}
-		fmt.Printf("Piece %d downloaded to %s.\n", piece, outPath)
 	default:
 		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
 	}
+}
+
+func downloadPieceCmd(args []string) error {
+	flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
+
+	var outPath string
+	flags.StringVar(&outPath, "o", "", "Ouput path")
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	filePath := flags.Arg(0)
+	piece, _ := strconv.Atoi(flags.Arg(1))
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var t Tracker
+	err = bencode.Unmarshal(f, &t)
+	if err != nil {
+		return err
+	}
+
+	peers, err := discoverPeers(t)
+	if err != nil {
+		return err
+	}
+
+	peer := peers[0]
+
+	fmt.Printf("Peer: %s\n", peer)
+
+	conn, err := handshakePeer(t, peer)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	var m message
+	if err := m.Recv(conn, Bitfield); err != nil {
+		return err
+	}
+
+	// TODO: check that bitfield's payload has the len(pieces) bits set
+	fmt.Printf("bitfield - %d\n", m.Payload)
+
+	if err := m.Send(conn, Interested, nil); err != nil {
+		return err
+	}
+
+	if err := m.Recv(conn, Unchoke); err != nil {
+		return err
+	}
+
+	fmt.Printf("unchoke - %d\n", m.Payload)
+
+	pf, err := os.CreateTemp("", filePath)
+	if err != nil {
+		return err
+	}
+	defer pf.Close()
+
+	_, err = downloadPiece(conn, m, t, piece, pf)
+	if err != nil {
+		return err
+	}
+
+	pf.Seek(0, io.SeekStart)
+
+	h := sha1.New()
+	if _, err := io.Copy(h, pf); err != nil {
+		return err
+	}
+
+	fmt.Printf("Piece hash: %x\n", h.Sum(nil))
+
+	if err := os.Rename(pf.Name(), outPath); err != nil {
+		os.Remove(pf.Name())
+		return err
+	}
+
+	fmt.Printf("Piece %d downloaded to %s.\n", piece, outPath)
+
+	return nil
+}
+
+func downloadCmd(args []string) error {
+	flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
+
+	var outPath string
+	flags.StringVar(&outPath, "o", "", "Ouput path")
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	torrentFile := flags.Arg(0)
+	t, err := newTrackerFromPath(torrentFile)
+	if err != nil {
+		return err
+	}
+
+	peers, err := discoverPeers(t)
+	if err != nil {
+		return err
+	}
+
+	conn, err := handshakePeer(t, peers[0])
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	var m message
+	if err := m.Recv(conn, Bitfield); err != nil {
+		return nil
+	}
+
+	// TODO: check that bitfield's payload has the len(pieces) bits set
+	//fmt.Printf("bitfield - %d\n", m.Payload)
+
+	if err := m.Send(conn, Interested, nil); err != nil {
+		return nil
+	}
+	if err := m.Recv(conn, Unchoke); err != nil {
+		return nil
+	}
+
+	f, err := os.CreateTemp("", "")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if err := f.Truncate(int64(t.Info.Length)); err != nil {
+		return err
+	}
+
+	var errRet error
+
+	piecesIter := t.Info.PiecesAll()
+	piecesIter(func(n int, pieceHash []byte) bool {
+		baseOff := int64(uint64(n) * t.Info.PieceLength)
+
+		pw := io.NewOffsetWriter(f, baseOff)
+		plen, err := downloadPiece(conn, m, t, n, pw)
+		if err != nil {
+			errRet = err
+			return false
+		}
+
+		hasher := sha1.New()
+		if _, err := io.Copy(hasher, io.NewSectionReader(f, baseOff, plen)); err != nil {
+			errRet = err
+			return false
+		}
+
+		if gotHash := hasher.Sum(nil); !bytes.Equal(pieceHash, gotHash) {
+			errRet = fmt.Errorf("malformed piece %d: want hash %x, got %x", n, pieceHash, gotHash)
+			return false
+		}
+
+		return true
+	})
+
+	if errRet != nil {
+		os.Remove(f.Name())
+		return errRet
+	}
+
+	if err := os.Rename(f.Name(), outPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Downloaded %s to %s.\n", torrentFile, outPath)
+
+	return nil
+}
+
+func downloadPiece(conn net.Conn, m message, t Tracker, piece int, pw io.WriterAt) (int64, error) {
+	// block per piece rounded up
+	blocksPerPiece := int((t.Info.PieceLength + maxBlockSize - 1) / maxBlockSize)
+
+	for b := 0; b < blocksPerPiece; b++ {
+		begin := uint32(b * maxBlockSize)
+		blen := uint32(maxBlockSize)
+
+		// the very last block (across all pieces) can be truncated, if file's length
+		// doesn't perfectly align to the size of a block
+		if total := uint64((piece + 1) * (b + 1) * int(blen)); total > t.Info.Length {
+			blen = blen - uint32(total-t.Info.Length)
+		}
+
+		payload := m.packUint32(uint32(piece), begin, blen)
+		if err := m.Send(conn, Request, payload); err != nil {
+			return 0, err
+		}
+	}
+
+	var plen int64
+	for b := blocksPerPiece; b > 0; b-- {
+		if err := m.Recv(conn, Piece); err != nil {
+			return 0, err
+		}
+
+		if p := binary.BigEndian.Uint32(m.Payload[:]); p != uint32(piece) {
+			return 0, fmt.Errorf("unexpected piece index %d", p)
+		}
+
+		begin := binary.BigEndian.Uint32(m.Payload[4:])
+		sz, err := pw.WriteAt(m.Payload[8:], int64(begin))
+		if err != nil {
+			return 0, err
+		}
+		plen += int64(sz)
+	}
+
+	return plen, nil
 }
 
 func discoverPeers(t Tracker) ([]netip.AddrPort, error) {
@@ -372,11 +472,58 @@ func discoverPeers(t Tracker) ([]netip.AddrPort, error) {
 	return resp.Peers(), nil
 }
 
+func handshakePeer(t Tracker, peer netip.AddrPort) (_ net.Conn, err error) {
+	conn, err := net.Dial("tcp", peer.String())
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+
+	infoHash, err := t.InfoHash()
+	if err != nil {
+		return nil, err
+	}
+
+	hsk := newHandshake(infoHash)
+
+	_, err = hsk.WriteTo(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = hsk.ReadFrom(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	if hsk.Tag != protocolStrLen {
+		return nil, fmt.Errorf("handshake peer %s: unexpected response tag %v", peer, hsk.Tag)
+	}
+
+	return conn, nil
+}
+
 type Tracker struct {
 	// Announce is a URL to a tracker.
 	Announce string
 	// Info contains metainfo of a tracker.
 	Info TrackerInfo
+}
+
+func newTrackerFromPath(path string) (t Tracker, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return t, err
+	}
+	defer f.Close()
+
+	err = bencode.Unmarshal(f, &t)
+	return t, err
 }
 
 type TrackerInfo struct {
