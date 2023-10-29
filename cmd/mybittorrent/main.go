@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -15,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unsafe"
 
 	bencode "github.com/jackpal/bencode-go"
 )
@@ -139,9 +139,11 @@ func main() {
 		fmt.Printf("Piece Length: %d\n", t.Info.PieceLength)
 
 		fmt.Printf("Piece Hashes:\n")
-		for p := []byte(t.Info.Pieces); len(p) > 0; p = p[20:] {
-			fmt.Printf("%x\n", p[:20])
-		}
+		piecesIter := t.Info.PiecesAll()
+		piecesIter(func(_ int, piece []byte) bool {
+			fmt.Printf("%x\n", piece)
+			return true
+		})
 	case "peers":
 		filePath := os.Args[2]
 		f, err := os.Open(filePath)
@@ -156,24 +158,12 @@ func main() {
 			panic(err)
 		}
 
-		turl, err := trackerURLFrom(t)
+		peers, err := discoverPeers(t)
 		if err != nil {
 			panic(err)
 		}
 
-		httpResp, err := http.Get(turl)
-		if err != nil {
-			panic(err)
-		}
-		defer httpResp.Body.Close()
-
-		var trackerResp trackerResponse
-		err = bencode.Unmarshal(httpResp.Body, &trackerResp)
-		if err != nil {
-			panic(err)
-		}
-
-		for _, peer := range trackerResp.Peers() {
+		for _, peer := range peers {
 			fmt.Println(peer.String())
 		}
 	case "handshake":
@@ -218,10 +208,166 @@ func main() {
 		}
 
 		fmt.Printf("Peer ID: %x\n", hsk.PeerID)
+	case "download_piece":
+		flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
+
+		var outPath string
+		flags.StringVar(&outPath, "o", "", "Ouput path")
+
+		if err := flags.Parse(os.Args[2:]); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		filePath := flags.Arg(0)
+		piece, _ := strconv.Atoi(flags.Arg(1))
+		_ = piece
+
+		f, err := os.Open(filePath)
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+
+		var t Tracker
+		err = bencode.Unmarshal(f, &t)
+		if err != nil {
+			panic(err)
+		}
+
+		peers, err := discoverPeers(t)
+		if err != nil {
+			panic(err)
+		}
+
+		peer := peers[0]
+
+		fmt.Printf("Peer: %s\n", peer)
+
+		conn, err := net.Dial("tcp", peer.String())
+		if err != nil {
+			panic(err)
+		}
+		defer conn.Close()
+
+		hsk, err := handshakeFrom(t)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = hsk.WriteTo(conn)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = hsk.ReadFrom(conn)
+		if err != nil {
+			panic(err)
+		}
+
+		if hsk.Tag != protocolStrLen {
+			panic("unexpected handshake response")
+		}
+
+		var m message
+		if err := m.Recv(conn, Bitfield); err != nil {
+			panic(err)
+		}
+
+		// TODO: check that bitfield's payload has the len(pieces) bits set
+		fmt.Printf("bitfield - %d\n", m.Payload)
+
+		if err := m.Send(conn, Interested, nil); err != nil {
+			panic(err)
+		}
+
+		if err := m.Recv(conn, Unchoke); err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("unchoke - %d\n", m.Payload)
+
+		// block per piece rounded up
+		blocksPerPiece := int((t.Info.PieceLength + maxBlockSize - 1) / maxBlockSize)
+
+		pf, err := os.CreateTemp("", filePath)
+		if err != nil {
+			panic(err)
+		}
+
+		for b := 0; b < blocksPerPiece; b++ {
+			begin := uint32(b * maxBlockSize)
+			blen := uint32(maxBlockSize)
+
+			// the very last block (across all pieces) can be truncated, if file's length
+			// doesn't perfectly align to the size of a block
+			if total := uint64((piece + 1) * (b + 1) * int(blen)); total > t.Info.Length {
+				blen = blen - uint32(total-t.Info.Length)
+			}
+
+			payload := m.packUint32(uint32(piece), begin, blen)
+			if err := m.Send(conn, Request, payload); err != nil {
+				panic(err)
+			}
+
+			//fmt.Printf("send: piece %d, block %d\n", piece, b)
+
+			if err := m.Recv(conn, Piece); err != nil {
+				panic(err)
+			}
+
+			if p := binary.BigEndian.Uint32(m.Payload[:]); p != uint32(piece) {
+				panic("unexpected piece")
+			}
+
+			//fmt.Printf("recv: piece %d, %d\n", piece, len(m.Payload))
+
+			begin = binary.BigEndian.Uint32(m.Payload[4:])
+			_, err := pf.WriteAt(m.Payload[8:], int64(begin))
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		pf.Seek(0, io.SeekStart)
+
+		h := sha1.New()
+		if _, err := io.Copy(h, pf); err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Piece hash: %x\n", h.Sum(nil))
+
+		if err := os.Rename(pf.Name(), outPath); err != nil {
+			os.Remove(pf.Name())
+			panic(err)
+		}
+		fmt.Printf("Piece %d downloaded to %s.\n", piece, outPath)
 	default:
 		fmt.Println("Unknown command: " + cmd)
 		os.Exit(1)
 	}
+}
+
+func discoverPeers(t Tracker) ([]netip.AddrPort, error) {
+	turl, err := trackerURLFrom(t)
+	if err != nil {
+		return nil, err
+	}
+
+	httpResp, err := http.Get(turl)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+
+	var resp trackerResponse
+	err = bencode.Unmarshal(httpResp.Body, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Peers(), nil
 }
 
 type Tracker struct {
@@ -235,12 +381,28 @@ type TrackerInfo struct {
 	// Name is a suggested name to save the file or directory as.
 	Name string `bencode:"name"`
 	// PieceLength is the number of bytes in each piece the file is split into.
-	PieceLength int64 `bencode:"piece length"`
+	PieceLength uint64 `bencode:"piece length"`
 	// Pieces is a string of multiple of 20. It is to be subdivided into strings of length 20,
 	// each of which is the SHA1 hash of the piece at the corresponding index.
 	Pieces string `bencode:"pieces"`
 	// Length is the size of the file in bytes, for single-file torrents
 	Length uint64 `bencode:"length"`
+}
+
+func (info TrackerInfo) PiecesAll() func(func(int, []byte) bool) {
+	return func(yield func(int, []byte) bool) {
+		var n int
+		for p := []byte(info.Pieces); len(p) > 0; p = p[20:] {
+			if !yield(n, p[:20]) {
+				return
+			}
+			n++
+		}
+	}
+}
+
+func (info TrackerInfo) PiecesTotal() int {
+	return len(info.Pieces) % 20
 }
 
 func (t Tracker) InfoHash() ([]byte, error) {
@@ -303,47 +465,4 @@ func (tr trackerResponse) Peers() []netip.AddrPort {
 		rawPeers = rawPeers[6:]
 	}
 	return peers
-}
-
-type handshake struct {
-	// Tag is the length of the protocol string, always 19
-	Tag byte
-	// Proto is the protocol string "BitTorrent protocol"
-	Proto [19]byte
-	// Reserved is reserved bytes, which are all set to zero
-	Reserved [8]byte
-	// InfoHash is the info hash of the torrent
-	InfoHash [20]byte
-	// PeerID is the id of the peer
-	PeerID [20]byte
-}
-
-func handshakeFrom(t Tracker) (handshake, error) {
-	infoHash, err := t.InfoHash()
-	if err != nil {
-		return handshake{}, nil
-	}
-	hsk := handshake{
-		Tag:      19,
-		Proto:    [19]byte([]byte("BitTorrent protocol")),
-		InfoHash: [20]byte(infoHash),
-		PeerID:   [20]byte([]byte("00112233445566778899")),
-	}
-	return hsk, nil
-}
-
-func (hsk handshake) WriteTo(w io.Writer) (int64, error) {
-	err := binary.Write(w, binary.BigEndian, hsk)
-	if err != nil {
-		return 0, err
-	}
-	return int64(unsafe.Sizeof(hsk)), nil
-}
-
-func (hsk *handshake) ReadFrom(r io.Reader) (int64, error) {
-	err := binary.Read(r, binary.BigEndian, hsk)
-	if err != nil {
-		return 0, err
-	}
-	return int64(unsafe.Sizeof(hsk)), nil
 }
