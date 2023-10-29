@@ -16,6 +16,7 @@ import (
 	"strconv"
 
 	bencode "github.com/jackpal/bencode-go"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -239,6 +240,9 @@ func downloadPieceCmd(args []string) error {
 	return nil
 }
 
+// maximum number of pieces downloaded concurrently
+const maxConcurrentPieces = 5
+
 func downloadCmd(args []string) error {
 	flags := flag.NewFlagSet("download_piece", flag.ExitOnError)
 
@@ -255,33 +259,45 @@ func downloadCmd(args []string) error {
 		return err
 	}
 
-	peers, err := discoverPeers(t)
+	peersAddr, err := discoverPeers(t)
 	if err != nil {
 		return err
 	}
 
-	conn, err := net.Dial("tcp", peers[0].String())
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	peer := NewPeer(conn)
-
-	err = handshakePeer(t, peer)
+	infoHash, err := t.InfoHash()
 	if err != nil {
 		return err
 	}
 
-	if _, err := peer.Recv(Bitfield); err != nil {
-		return nil
-	}
+	peers := make([]*Peer, len(peersAddr))
+	for i, addr := range peersAddr {
+		conn, err := net.Dial("tcp", addr.String())
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
 
-	if err := peer.Send(Interested, nil); err != nil {
-		return nil
-	}
-	if _, err := peer.Recv(Unchoke); err != nil {
-		return nil
+		peer := NewPeer(conn)
+
+		peerID, err := peer.Handshake(infoHash)
+		if err != nil {
+			return err
+		}
+
+		if payload, err := peer.Recv(Bitfield); err != nil {
+			return nil
+		} else {
+			fmt.Printf("peer %x (%s): bitfield - %d\n", peerID, addr, payload)
+		}
+
+		if err := peer.Send(Interested, nil); err != nil {
+			return nil
+		}
+		if _, err := peer.Recv(Unchoke); err != nil {
+			return nil
+		}
+
+		peers[i] = peer
 	}
 
 	f, err := os.CreateTemp("", "")
@@ -294,36 +310,41 @@ func downloadCmd(args []string) error {
 		return err
 	}
 
-	var errRet error
+	var g errgroup.Group
+	g.SetLimit(maxConcurrentPieces)
 
 	piecesIter := t.Info.PiecesAll()
 	piecesIter(func(n int, pieceHash []byte) bool {
-		baseOff := int64(uint64(n) * t.Info.PieceLength)
+		peer := peers[n%len(peers)]
 
-		pw := io.NewOffsetWriter(f, baseOff)
-		plen, err := downloadPiece(peer, t, n, pw)
-		if err != nil {
-			errRet = err
-			return false
-		}
+		g.Go(func() error {
+			baseOff := int64(uint64(n) * t.Info.PieceLength)
+			pw := io.NewOffsetWriter(f, baseOff)
+			plen, err := downloadPiece(peer, t, n, pw)
+			if err != nil {
+				return err
+			}
 
-		hasher := sha1.New()
-		if _, err := io.Copy(hasher, io.NewSectionReader(f, baseOff, plen)); err != nil {
-			errRet = err
-			return false
-		}
+			h := sha1.New()
+			if _, err := io.Copy(h, io.NewSectionReader(f, baseOff, plen)); err != nil {
+				return err
+			}
+			gotHash := h.Sum(nil)
+			if !bytes.Equal(pieceHash, gotHash) {
+				return fmt.Errorf("malformed piece %d: want hash %x, got %x", n, pieceHash, gotHash)
+			}
 
-		if gotHash := hasher.Sum(nil); !bytes.Equal(pieceHash, gotHash) {
-			errRet = fmt.Errorf("malformed piece %d: want hash %x, got %x", n, pieceHash, gotHash)
-			return false
-		}
+			fmt.Printf("piece %d - %x\n", n, pieceHash)
+
+			return nil
+		})
 
 		return true
 	})
 
-	if errRet != nil {
+	if err := g.Wait(); err != nil {
 		os.Remove(f.Name())
-		return errRet
+		return err
 	}
 
 	if err := os.Rename(f.Name(), outPath); err != nil {

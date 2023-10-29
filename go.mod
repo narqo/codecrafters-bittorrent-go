@@ -11,3 +11,5 @@ module github.com/codecrafters-io/bittorrent-starter-go
 go 1.20
 
 require github.com/jackpal/bencode-go v1.0.0
+
+require golang.org/x/sync v0.4.0
