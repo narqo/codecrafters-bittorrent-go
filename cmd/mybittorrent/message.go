@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 )
 
@@ -22,81 +21,91 @@ const (
 
 const (
 	maxBlockSize   = 1 << 14
-	maxMessageSize = maxBlockSize + 8 + 8
+	maxPayloadSize = maxBlockSize + 8 + 8
 )
 
-type message struct {
-	length uint32
-	typ    MessageType
-	buf    [maxMessageSize]byte
-
-	Payload []byte
+type MessagePayload interface {
+	io.Reader
 }
 
-func (m *message) Recv(r io.Reader, typ MessageType) error {
-	for {
-		_, err := m.ReadFrom(r)
-		if err == io.EOF {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if m.typ != typ {
-			return fmt.Errorf("recv: expected type %v, got %v", typ, m.typ)
-		}
-		return nil
+type ZeroPayload struct{}
+
+func (p ZeroPayload) Read(b []byte) (int, error) {
+	return 0, nil
+}
+
+type RawPayload []byte
+
+func (p RawPayload) Read(b []byte) (int, error) {
+	if len(b) < len([]byte(p)) {
+		return 0, io.ErrShortBuffer
+	}
+	n := copy(b, []byte(p))
+	return n, nil
+}
+
+type RequestPayload struct {
+	Piece uint32
+	Begin uint32
+	BLen  uint32
+}
+
+func (p RequestPayload) Read(b []byte) (int, error) {
+	if len(b) < 3*4 {
+		return 0, io.ErrShortBuffer
+	}
+	packUint32(b, p.Piece, p.Begin, p.BLen)
+	return 3 * 4, nil
+}
+
+func packUint32(buf []byte, v ...uint32) {
+	for n, val := range v {
+		binary.BigEndian.PutUint32(buf[n*4:], val)
 	}
 }
 
-func (m *message) Send(w io.Writer, typ MessageType, payload []byte) error {
-	m.length = uint32(1 + len(payload))
-	m.typ = typ
-	m.Payload = payload
-	_, err := m.WriteTo(w)
-	return err
+type message struct {
+	length  uint32
+	typ     MessageType
+	payload []byte
+	buf     [maxPayloadSize]byte
 }
 
 func (m *message) WriteTo(w io.Writer) (int64, error) {
-	binary.BigEndian.PutUint32(m.buf[:4], m.length)
-	m.buf[4] = byte(m.typ)
+	var buf [5]byte
+	binary.BigEndian.PutUint32(buf[:], m.length)
+	buf[4] = byte(m.typ)
 
-	_, err := w.Write(m.buf[:5])
+	_, err := w.Write(buf[:])
 	if err != nil {
 		return 0, err
 	}
 
-	if m.Payload == nil {
+	// fast exit if m doesn't have payload
+	if m.length == 1 {
 		return 5, nil
 	}
 
-	n, err := w.Write(m.Payload)
+	n, err := w.Write(m.payload[:m.length-1])
 	if err != nil {
 		return 0, err
 	}
 	return int64(5 + n), nil
-}
-
-func (m *message) packUint32(v ...uint32) []byte {
-	for n, val := range v {
-		// first 5 bytes in buf are used for message header
-		binary.BigEndian.PutUint32(m.buf[5+n*4:], val)
-	}
-	return m.buf[5 : 5+len(v)*4]
 }
 
 func (m *message) ReadFrom(r io.Reader) (int64, error) {
-	_, err := io.ReadFull(r, m.buf[:5])
+	var buf [5]byte
+	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
 		return 0, err
 	}
-	m.length = binary.BigEndian.Uint32(m.buf[:4])
-	m.typ = MessageType(m.buf[4])
+	m.length = binary.BigEndian.Uint32(buf[:])
+	m.typ = MessageType(buf[4])
 
-	m.Payload = m.buf[:m.length-1]
-	n, err := io.ReadFull(r, m.Payload)
+	m.payload = m.buf[:m.length-1]
+	n, err := io.ReadFull(r, m.payload)
 	if err != nil {
 		return 0, err
 	}
-	return int64(5 + n), nil
+	return int64(len(buf) + n), nil
 }

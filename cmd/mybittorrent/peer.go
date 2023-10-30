@@ -3,17 +3,22 @@ package main
 import (
 	"fmt"
 	"io"
+	"sync"
 )
 
 type Peer struct {
 	conn io.ReadWriter
-	msg  message
+
+	mu  sync.Mutex
+	msg message
 }
 
 func NewPeer(conn io.ReadWriter) *Peer {
-	return &Peer{
+	p := &Peer{
 		conn: conn,
 	}
+	p.msg.payload = p.msg.buf[:]
+	return p
 }
 
 func (p *Peer) Handshake(infoHash []byte) ([]byte, error) {
@@ -36,12 +41,10 @@ func (p *Peer) Handshake(infoHash []byte) ([]byte, error) {
 	return hsk.PeerID[:], nil
 }
 
-func (p *Peer) Request(piece int, begin, blen uint32) error {
-	payload := p.msg.packUint32(uint32(piece), begin, blen)
-	return p.Send(Request, payload)
-}
-
 func (p *Peer) Recv(typ MessageType) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	for {
 		_, err := p.msg.ReadFrom(p.conn)
 		if err == io.EOF {
@@ -53,15 +56,27 @@ func (p *Peer) Recv(typ MessageType) ([]byte, error) {
 		if p.msg.typ != typ {
 			return nil, fmt.Errorf("recv: expected type %v, got %v", typ, p.msg.typ)
 		}
-		return p.msg.Payload, nil
+		return p.msg.payload, nil
 	}
 }
 
-func (p *Peer) Send(typ MessageType, payload []byte) error {
-	m := p.msg
-	m.length = uint32(1 + len(payload))
-	m.typ = typ
-	m.Payload = payload
-	_, err := m.WriteTo(p.conn)
+func (p *Peer) Send(typ MessageType, m MessagePayload) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	msg := p.msg
+	msg.typ = typ
+
+	var n int
+	if m != nil {
+		var err error
+		n, err = m.Read(msg.payload[:maxPayloadSize])
+		if err != nil {
+			return err
+		}
+	}
+	msg.length = uint32(1 + n)
+
+	_, err := msg.WriteTo(p.conn)
 	return err
 }

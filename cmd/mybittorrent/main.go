@@ -369,7 +369,8 @@ func downloadPiece(peer *Peer, t Tracker, piece int, pw io.WriterAt) (int64, err
 			blen = blen - uint32(total-t.Info.Length)
 		}
 
-		if err := peer.Request(piece, begin, blen); err != nil {
+		payload := RequestPayload{uint32(piece), begin, blen}
+		if err := peer.Send(Request, payload); err != nil {
 			return 0, err
 		}
 	}
